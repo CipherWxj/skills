@@ -13,13 +13,13 @@
 
 ## 分工边界
 
-本 prompt 只规定结构评估的执行顺序和输出包装；具体判断标准以 `assets/01-doc-structure.yaml` 为准。
+本 prompt 只负责结构评估阶段的执行顺序、证据抽取顺序和 `structure-review.json` 输出包装。
 
-- `01-doc-structure.yaml` 负责：规则清单、适用条件、状态判定、严重度边界、证据要求、模板占位过滤和外链处理。
-- 本 prompt 负责：如何通读 PRD、如何按规则形成判断、如何把判断整理为 `structure-review.json`。
-- 若本 prompt 与 YAML 对同一判断点表述不一致，以 YAML 的 `review_principles`、`granularity_guidance`、`rules`、`additional_checks` 为准。
+- `01-doc-structure.yaml` 是结构评估的唯一规则事实来源，负责规则适用条件、状态判定、严重度边界、证据要求、过滤/降级策略、问题颗粒度和输出措辞约束。
+- 本 prompt 只规定如何通读 PRD、如何逐条套用 YAML 规则、如何组织阶段产物；不得新增、改写或覆盖 YAML 中的判断标准。
+- 若本 prompt 与 YAML 对同一判断点表述不一致，以 YAML 的 `review_principles`、`granularity_guidance`、`output_guidance`、`rules`、`additional_checks` 为准。
 
-## Task
+## 任务
 
 执行以下分析：
 
@@ -27,11 +27,10 @@
 
 先通读 PRD 全文，识别：
 
-- 文档目标与改动范围
-- 章节层级与主要模块
-- 哪些章节是主体内容，哪些只是补充或附录
-- 哪些区域明显属于高风险结构入口，例如影响范围、数据改造、实验、完成口径、依赖
-- 哪些内容只是模板占位或协作追踪，不承载本期核心结构信息
+- 需求目标、改动范围与本期交付对象。
+- 章节层级与主要模块，以及主体内容 / 补充材料 / 附录的边界。
+- 哪些章节或模块可能触发结构规则，先标记候选，不在本阶段判断命中。
+- 哪些内容可能属于模板占位、评论、外链、无权限材料等特殊情况，先标记候选，不在本阶段过滤或扣分。
 
 这一步只建立整体视图，不输出结论。
 
@@ -39,32 +38,29 @@
 
 对 `01-doc-structure.yaml` 的每条 `rules[]` 执行同一套动作：
 
-1. 先根据 `trigger_when`、`assessment_points` 和 PRD 上下文判断规则是否适用。
-2. 再按 `judge_as` 输出 `clear / partial / missing / not_applicable` 中的一个状态。
-3. 若状态为 `partial` 或 `missing`，按 `severity_guidance` 判断严重度。
-4. 按 `evidence_guidance` 从 PRD 原文中抽取 1-2 句证据。
-5. 对模板占位、空章节、图片、外链、引用内容，按 YAML 的 `additional_checks` 处理。
+1. 根据 `check`、`trigger_when`、`assessment_points`、`signals`、章节上下文和整体结构视图判断规则是否适用；不要只因命中关键词就下结论，不适用时按 `not_applicable` 处理。
+2. 按 YAML 的 `additional_checks` 处理模板占位、空章节、图片/外链、无权限材料、埋点排除和评论等过滤或降级场景。
+3. 对未被过滤的规则，按 `judge_as` 判定 `clear / partial / missing`。
+4. 仅当状态为 `partial` 或 `missing` 时，按 `severity_guidance` 判断严重度，并按 `evidence_guidance` 抽取并归一化证据文本。
+5. evidence 优先引用当前 PRD 正文；只有当评论回复承载正文未同步的最终结论，或评论与当前正文存在未裁决冲突时，才同时引用评论作为补充证据。
 
-### 3. 抽取结构级问题
+### 3. 整理结构级 findings
 
-仅输出**结构层面**的问题，不进入内容质量细节。执行时：
+基于第 2 步的逐条判定结果整理输出，不重新执行规则判断：
 
-- 参考 YAML 的 `granularity_guidance` 决定拆分还是合并 finding。
-- 保留真正影响评审、研发理解或测试设计的结构缺口。
-- 过滤不影响核心结构的模板占位，并写入 `non_blocking_notes`。
-- 不把字段取值、异常流程、埋点参数、实验指标细节提前作为结构问题；这些留到内容质量阶段。
+- 仅把状态为 `partial` 或 `missing`，且未被 `additional_checks` 过滤的规则整理为正式 finding；`clear` 和 `not_applicable` 不进入 findings、不参与扣分。
+- 每条 finding 按 YAML 的 `granularity_guidance` 控制颗粒度，避免同一根因重复输出。
+- 对已过滤或降级的候选，只写入 `non_blocking_notes`，不参与正式 finding。
+- finding 描述只表达结构入口缺口及其对评审、研发或测试动作的影响，不展开字段取值、异常流程等内容质量细节。
 
 ### 4. 生成结构摘要
 
 用一句话总结这份 PRD 的结构状况，重点说明：
 
-- 是“结构齐全但细节不足”
-- 还是“缺少关键骨架”
-- 或者“基本可进入下一步内容评估”
+- 是“结构齐全但细节不足”。
+- 还是“缺少关键骨架”。
 
 ## 输出格式
-
-输出 JSON：
 
 ```json
 {
@@ -80,16 +76,8 @@
       "severity": "high | medium | low",
       "description": "问题描述",
       "evidence": "引用原文 1-2 句",
-      "reasoning": "为什么命中"
+      "reasoning": "为什么命中，以及影响哪个评审、研发或测试动作"
     }
   ]
 }
 ```
-
-## 注意事项
-
-- 只做结构级判断，不深入具体功能逻辑细节，那是后续内容评估阶段的工作
-- `clear` 和 `not_applicable` 不一定要写进 `findings`，`findings` 主要保留真正需要提示的问题项
-- 输出字段、状态值和严重度必须与 YAML 的 `meta.output_hint` 和规则字段保持一致
-- 不要因为看到一个关键词就下结论，必须结合章节上下文、规则适用条件和整体结构视图判断
-- 每个正式 finding 的 `reasoning` 必须说明：该结构缺口影响哪个评审、研发或测试动作

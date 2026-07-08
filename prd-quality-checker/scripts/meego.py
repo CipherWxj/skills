@@ -4,9 +4,13 @@
 用途：
     根据 Meego story 工作项 ID 查询工作项详情，并提取需求文档字段（wiki）。
 
-调用示例：
+    查询示例：
     source .venv/bin/activate
     python3 .trae/skills/prd-quality-checker/scripts/meego.py --meegoid 123456789
+
+    写回报告链接示例：
+      source .venv/bin/activate
+      python3 .trae/skills/prd-quality-checker/scripts/meego.py --meegoid 123456789 --prdreporturl https://example.feishu.cn/docx/xxx
 
 输出：
     JSON 对象，包含 prd_url。
@@ -21,13 +25,13 @@ import urllib.request
 
 class MeegoTools:
     def __init__(self):
-        self.plugin_id = "xxxxxxxxx"  # 需补充插件ID
+        self.plugin_id = "MII_653632F539018002"
         self.plugin_secret = (
-            "xxxxxxxxxx"  # 需补充插件密钥
+            "7776EAFF8492100A056F056AD7BE12A8"  # ai-test-tool的插件密钥
         )
         self.host = "https://project.feishu.cn"
         self.project_key = "dcar"
-        self.user_key = "xxxxxxxxx"  # 需补充用户key
+        self.user_key = "7641032723750030306"  # wangxinjian.21的用户key
         self.plugin_token = self.get_plugin_token()["data"]["token"]
         self.headers = {
             "Content-Type": "application/json",
@@ -60,6 +64,18 @@ class MeegoTools:
             "body": body or {},
             "headers": self.headers,
             "method": "post",
+        }
+        return self.run(printed=False)
+
+    def put_request(self, path="", body=None):
+        """PUT请求"""
+        if not path:
+            raise ValueError("path is required")
+        self.request_data = {
+            "url": f"{self.host}{path}",
+            "body": body or {},
+            "headers": self.headers,
+            "method": "put",
         }
         return self.run(printed=False)
 
@@ -124,22 +140,48 @@ class MeegoTools:
 
         response = self.post_request(
             path=f"/open_api/{self.project_key}/work_item/{work_item_type_key}/query",
-            body={"work_item_ids": [work_item_id]},
+            body={
+                "work_item_ids": [work_item_id],
+                "fields": ["wiki", "field_e7524f", "field_7a5877"],
+            },
         )
         work_items = response.get("data") or []
         if not work_items:
             return {}
         work_item = work_items[0]
         prd_wiki = ""
+        prd_report = ""
         for field in work_item.get("fields") or []:
             field_key = field.get("field_key")
             if field_key == "wiki":
                 prd_wiki = field.get("field_value") or ""
+            elif field_key == "field_e7524f":
+                prd_report = field.get("field_value") or ""
+            if prd_wiki and prd_report:
                 break
-
         return {
             "prd_url": prd_wiki,
+            "prd_report_url": prd_report,
         }
+
+    def update_work_item_info(self, work_item_id, work_item_type_key, prd_report_url):
+        """更新单个飞书项目工作项详情，根据工作项类型（story）。"""
+        if work_item_type_key not in ["story"]:
+            raise ValueError("暂时仅支持更新 需求文档")
+        if not prd_report_url:
+            raise ValueError("prd_report_url is required")
+        response = self.put_request(
+            path=f"/open_api/{self.project_key}/work_item/{work_item_type_key}/{work_item_id}",
+            body={
+                "update_fields": [
+                    {"field_key": "field_e7524f", "field_value": prd_report_url}
+                ],
+            },
+        )
+        code = response.get("err_code")
+        if code == 0:
+            return True
+        return False
 
 
 def _parse_response(response_text):
@@ -151,37 +193,40 @@ def _parse_response(response_text):
         return response_text
 
 
-def _parse_work_item_id(value):
-    """解析单个工作项 ID。"""
-    item = value.strip()
-    if not item:
-        raise argparse.ArgumentTypeError("work item id 不能为空")
-    if "," in item:
-        raise argparse.ArgumentTypeError("仅支持单个工作项 ID，不支持多个 ID")
-    try:
-        return int(item)
-    except ValueError as error:
-        raise argparse.ArgumentTypeError(f"非法工作项 ID: {item}") from error
-
-
 def main(argv=None):
     """主函数，查询 Meego 工作项信息"""
     parser = argparse.ArgumentParser(description="查询 Meego 工作项信息")
     parser.add_argument(
         "--meegoid",
         dest="work_item_id",
-        type=_parse_work_item_id,
+        type=int,
         required=True,
         help="单个工作项 ID，例如：123456789",
+    )
+    parser.add_argument(
+        "--prdreporturl",
+        dest="prd_report_url",
+        type=str,
+        default="",
+        help="需要写回工作项的 PRD 质检报告链接",
     )
     args = parser.parse_args(argv)
 
     tool = MeegoTools()
+    result = {}
 
-    result = tool.get_work_item_info(
-        work_item_id=args.work_item_id,
-        work_item_type_key="story",
-    )
+    if args.prd_report_url:
+        update_success = tool.update_work_item_info(
+            work_item_id=args.work_item_id,
+            work_item_type_key="story",
+            prd_report_url=args.prd_report_url,
+        )
+        result["update_prd_report_url_success"] = update_success
+    else:
+        result = tool.get_work_item_info(
+            work_item_id=args.work_item_id,
+            work_item_type_key="story",
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
 
